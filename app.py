@@ -24,6 +24,7 @@ from flask import Flask
 from iam.application.services import AuthApplicationService
 from iam.infrastructure.database import DeviceModel
 from iam.infrastructure.repositories import DeviceRepository
+from iam.interfaces.routes import iam_api
 from shared.infrastructure.database import init_db
 from telemetry.application.threshold_sync import ThresholdSyncService
 from telemetry.infrastructure.database import (
@@ -75,6 +76,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
 
     # Registrar blueprints
+    app.register_blueprint(iam_api)
     app.register_blueprint(telemetry_api)
 
     # Flag de bootstrap: se ejecuta solo en el primer request
