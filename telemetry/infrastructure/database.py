@@ -3,9 +3,11 @@ telemetry/infrastructure/database.py
 
 Modelos Peewee para las tablas de telemetría.
 
-TelemetryRecordModel — tabla `telemetry_records`: encabezado del lote de lecturas.
-SensorReadingModel   — tabla `sensor_readings`: lecturas individuales de sensores,
-                       con FK a telemetry_records.
+TelemetryRecordModel    — tabla `telemetry_records`: encabezado del lote de lecturas.
+SensorReadingModel      — tabla `sensor_readings`: lecturas individuales de sensores,
+                          con FK a telemetry_records.
+AgronomicThresholdModel — tabla `agronomic_thresholds`: umbrales sincronizados
+                          desde la nube, unique por variable.
 """
 
 from datetime import datetime, timezone
@@ -73,3 +75,27 @@ class SensorReadingModel(Model):
     class Meta:
         database = db
         table_name = "sensor_readings"
+
+
+class AgronomicThresholdModel(Model):
+    """
+    Tabla `agronomic_thresholds`.
+
+    Umbrales agronómicos sincronizados desde la nube para cada variable
+    monitoreada. Un registro por variable (unique constraint).
+
+    Columns:
+        id:        Clave primaria autoincremental.
+        variable:  Nombre de la variable (unique, p.ej. "temperature").
+        min_value: Valor mínimo aceptable según criterio agronómico.
+        max_value: Valor máximo aceptable según criterio agronómico.
+    """
+
+    id = AutoField()
+    variable = CharField(max_length=50, unique=True, index=True)
+    min_value = FloatField()
+    max_value = FloatField()
+
+    class Meta:
+        database = db
+        table_name = "agronomic_thresholds"
