@@ -33,3 +33,4 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+/edge_data.db-journal
