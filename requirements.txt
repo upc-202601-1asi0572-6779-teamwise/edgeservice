@@ -1,0 +1,4 @@
+flask>=3.1
+peewee>=4.1.0
+python-dateutil>=2.9
+requests>=2.32
