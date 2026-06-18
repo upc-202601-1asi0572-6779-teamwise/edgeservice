@@ -21,8 +21,9 @@ from iam.domain.model import Device
 class IDeviceRepository(ABC):
     """Contrato de acceso a datos para Device."""
 
+    @staticmethod
     @abstractmethod
-    def find_by_device_id(self, device_id: str) -> Optional[Device]:
+    def find_by_device_id(device_id: str) -> Optional[Device]:
         """
         Busca un dispositivo por su identificador.
 
@@ -31,6 +32,17 @@ class IDeviceRepository(ABC):
 
         Returns:
             Device si existe, None si no está registrado.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def save(device: "Device") -> None:
+        """
+        Persiste un Device en el repositorio.
+
+        Args:
+            device: Entidad Device a guardar.
         """
         raise NotImplementedError
 
