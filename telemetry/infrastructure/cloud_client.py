@@ -5,19 +5,40 @@ Cliente HTTP hacia el Web Service central (SmartPalmPlatform.API).
 
 CloudApiClient encapsula toda la comunicación saliente del Edge API
 con la nube. Falla silenciosamente: si el cloud no está disponible,
-los métodos retornan valores vacíos en lugar de propagar excepciones,
+los métodos retornan valores seguros en lugar de propagar excepciones,
 permitiendo que el Edge API opere en modo offline.
 
-Endpoints esperados en el Web Service (Sprint 3):
-  GET  /api/v1/agronomic-thresholds          — obtiene umbrales por device
-  POST /api/v1/telemetry/batch               — reenvía lote de lecturas
+Endpoints del Web Service utilizados:
+  GET  /api/v1/device/edge/{edgeMac}/iot/{iotMac}/threshold
+         — Obtiene el umbral agronómico configurado para el par edge/iot.
+         — Respuesta: { "edgeMac", "iotMac", "min", "max", "description", "type" }
+  POST /api/v1/device/edge/{edgeMac}/digest
+         — Envía el lote de lecturas en formato ReadDeviceSensorsDataResource.
+         — Respuesta: 200 OK (sin cuerpo).
 
-Configuración:
-  CLOUD_BASE_URL  — URL base del Web Service (sin slash final)
+Payload esperado por el endpoint /digest:
+  {
+      "readings": [
+          {"sensorType": "Temperature",  "measuredAt": "...", "value": 25.5},
+          {"sensorType": "Humidity",     "measuredAt": "...", "value": 65.0},
+          {"sensorType": "SoilMoisture", "measuredAt": "...", "value": 45.0},
+          {"sensorType": "Luminosity",   "measuredAt": "...", "value": 78.0}
+      ],
+      "measuredAt": "..."
+  }
+
+Configuración (variables de entorno):
+  CLOUD_BASE_URL  — URL base del Web Service, sin slash final.
                     Por defecto: http://localhost:5000
-  CLOUD_API_KEY   — API key para autenticación con el Web Service
-                    Por defecto: vacío (sin autenticación en desarrollo)
-  CLOUD_TIMEOUT   — Timeout en segundos para cada request
+  EDGE_MAC        — Dirección MAC de este nodo edge tal como fue registrada
+                    en el backend (p.ej. AA:BB:CC:DD:EE:FF).
+                    Requerida para construir las rutas de ambos endpoints.
+  IOT_MAC         — Dirección MAC del dispositivo IoT asociado, registrada
+                    en el backend (p.ej. BB:CC:DD:EE:FF:AA).
+                    Requerida únicamente para el endpoint de umbrales.
+  CLOUD_API_KEY   — API key opcional para autenticación con el Web Service.
+                    Por defecto: vacío (sin autenticación en desarrollo).
+  CLOUD_TIMEOUT   — Timeout en segundos para cada request.
                     Por defecto: 5
 """
 
@@ -32,8 +53,36 @@ from telemetry.domain.model import AgronomicThreshold, TelemetryRecord
 logger = logging.getLogger(__name__)
 
 _BASE_URL = os.getenv("CLOUD_BASE_URL", "http://localhost:5000")
-_API_KEY = os.getenv("CLOUD_API_KEY", "")
-_TIMEOUT = int(os.getenv("CLOUD_TIMEOUT", "5"))
+_EDGE_MAC = os.getenv("EDGE_MAC", "")
+_IOT_MAC  = os.getenv("IOT_MAC", "")
+_API_KEY  = os.getenv("CLOUD_API_KEY", "")
+_TIMEOUT  = int(os.getenv("CLOUD_TIMEOUT", "5"))
+
+# ─── Mapeo bidireccional entre nombres de variable del Edge API ─────────────
+# y SensorType del Web Service.
+# Edge API usa camelCase (p.ej. "soilMoisture"); backend usa PascalCase
+# (p.ej. "SoilMoisture"), con la excepción de "light" → "Luminosity".
+# ───────────────────────────────────────────────────────────────────────────
+_VARIABLE_TO_SENSOR_TYPE: dict[str, str] = {
+    "temperature":  "Temperature",
+    "humidity":     "Humidity",
+    "soilMoisture": "SoilMoisture",
+    "light":        "Luminosity",
+}
+
+_SENSOR_TYPE_TO_VARIABLE: dict[str, str] = {
+    v: k for k, v in _VARIABLE_TO_SENSOR_TYPE.items()
+}
+
+
+def _to_sensor_type(variable: str) -> str:
+    """Convierte el nombre de variable del Edge API al SensorType del backend."""
+    return _VARIABLE_TO_SENSOR_TYPE.get(variable, variable)
+
+
+def _to_variable(sensor_type: str) -> str:
+    """Convierte el SensorType del backend al nombre de variable del Edge API."""
+    return _SENSOR_TYPE_TO_VARIABLE.get(sensor_type, sensor_type.lower())
 
 
 class CloudApiClient:
@@ -41,7 +90,7 @@ class CloudApiClient:
     Cliente HTTP para comunicación con el Web Service central.
 
     Todos los métodos capturan excepciones de red y retornan valores
-    seguros (lista vacía, None) para garantizar que el Edge API nunca
+    seguros (lista vacía, False) para garantizar que el Edge API nunca
     falle por indisponibilidad del cloud.
     """
 
@@ -56,45 +105,71 @@ class CloudApiClient:
     @staticmethod
     def get_thresholds(device_id: str) -> list[AgronomicThreshold]:
         """
-        Obtiene los umbrales agronómicos configurados para un dispositivo.
+        Obtiene el umbral agronómico configurado para el par edge/iot.
 
-        Hace GET a /api/v1/agronomic-thresholds?deviceId=<device_id>.
+        Hace GET a /api/v1/device/edge/{edgeMac}/iot/{iotMac}/threshold.
         Si el cloud no responde o retorna un error, retorna lista vacía
         para que TelemetryDomainService use los valores por defecto.
 
+        El backend identifica los dispositivos por MAC address (EDGE_MAC e
+        IOT_MAC), no por el device_id interno del Edge API. El parámetro
+        device_id se conserva para compatibilidad con ThresholdSyncService
+        pero no se utiliza en la construcción de la URL.
+
         Args:
-            device_id: Identificador del dispositivo para filtrar umbrales.
+            device_id: Identificador interno del dispositivo (no utilizado
+                       en la ruta; la identificación en el cloud se realiza
+                       mediante las variables de entorno EDGE_MAC e IOT_MAC).
 
         Returns:
-            Lista de AgronomicThreshold sincronizados. Lista vacía si el
-            cloud no está disponible o retorna error.
+            Lista con un AgronomicThreshold sincronizado desde el cloud,
+            o lista vacía si el cloud no está disponible o las variables
+            de entorno no están configuradas.
         """
-        url = f"{_BASE_URL}/api/v1/agronomic-thresholds"
+        if not _EDGE_MAC or not _IOT_MAC:
+            logger.debug(
+                "EDGE_MAC o IOT_MAC no configurados — sincronización de umbrales omitida."
+            )
+            return []
+
+        url = (
+            f"{_BASE_URL}/api/v1/device/edge/{_EDGE_MAC}"
+            f"/iot/{_IOT_MAC}/threshold"
+        )
         try:
             response = requests.get(
                 url,
-                params={"deviceId": device_id},
                 headers=CloudApiClient._headers(),
                 timeout=_TIMEOUT,
             )
             response.raise_for_status()
 
             data = response.json()
-            thresholds = [
-                AgronomicThreshold(
-                    variable=item["variable"],
-                    min_value=float(item["minValue"]),
-                    max_value=float(item["maxValue"]),
-                )
-                for item in data
-                if "variable" in item and "minValue" in item and "maxValue" in item
-            ]
 
-            logger.info(
-                "Umbrales obtenidos del cloud: %d registros para device_id='%s'.",
-                len(thresholds),
-                device_id,
-            )
+            # El backend devuelve un objeto único AgronomicThresholdViewResource:
+            # { "edgeMac", "iotMac", "min", "max", "description", "type" }
+            # Normalizar a lista para procesar uniformemente.
+            if isinstance(data, dict):
+                data = [data]
+
+            if not isinstance(data, list) or len(data) == 0:
+                logger.info("Sin umbrales configurados en el cloud para este par edge/iot.")
+                return []
+
+            thresholds = []
+            for item in data:
+                threshold = AgronomicThreshold(
+                    variable=_to_variable(item.get("type", "")),
+                    min_value=float(item.get("min", 0.0)),
+                    max_value=float(item.get("max", 100.0)),
+                )
+                logger.info(
+                    "Umbral obtenido del cloud: variable='%s' [%.1f, %.1f].",
+                    threshold.variable,
+                    threshold.min_value,
+                    threshold.max_value,
+                )
+                thresholds.append(threshold)
             return thresholds
 
         except requests.exceptions.ConnectionError:
@@ -120,33 +195,42 @@ class CloudApiClient:
         return []
 
     @staticmethod
-    def post_telemetry_batch(record: TelemetryRecord) -> Optional[int]:
+    def post_telemetry_batch(record: TelemetryRecord) -> bool:
         """
         Reenvía un lote de lecturas al Web Service central.
 
-        Hace POST a /api/v1/telemetry/batch con el lote serializado.
-        Si el cloud no responde, retorna None sin interrumpir el flujo
+        Hace POST a /api/v1/device/edge/{edgeMac}/digest con el payload
+        en formato ReadDeviceSensorsDataResource esperado por el backend.
+        Si el cloud no responde, retorna False sin interrumpir el flujo
         principal del Edge API (el lote ya fue persistido localmente).
+
+        Los nombres de variable del Edge API (p.ej. "soilMoisture") se
+        convierten automáticamente al SensorType del backend (p.ej.
+        "SoilMoisture") mediante el mapeo _VARIABLE_TO_SENSOR_TYPE.
 
         Args:
             record: TelemetryRecord con las lecturas a reenviar.
 
         Returns:
-            ID del registro creado en el cloud si fue exitoso, None si falló.
+            True si el cloud respondió con HTTP 200 o 201, False si falló.
         """
-        url = f"{_BASE_URL}/api/v1/telemetry/batch"
+        if not _EDGE_MAC:
+            logger.debug("EDGE_MAC no configurado — reenvío al cloud omitido.")
+            return False
+
+        url = f"{_BASE_URL}/api/v1/device/edge/{_EDGE_MAC}/digest"
+        timestamp = record.recorded_at.isoformat()
+
         payload = {
-            "deviceId": record.device_id,
-            "recordedAt": record.recorded_at.isoformat(),
             "readings": [
                 {
-                    "variable": r.variable,
+                    "sensorType": _to_sensor_type(r.variable),
+                    "measuredAt": r.timestamp.isoformat(),
                     "value": r.value,
-                    "unit": r.unit,
-                    "timestamp": r.timestamp.isoformat(),
                 }
                 for r in record.readings
             ],
+            "measuredAt": timestamp,
         }
 
         try:
@@ -158,13 +242,14 @@ class CloudApiClient:
             )
             response.raise_for_status()
 
-            cloud_id: Optional[int] = response.json().get("id")
             logger.info(
-                "Lote reenviado al cloud: device_id='%s', cloud_id=%s.",
+                "Lote reenviado al cloud: device_id='%s', edge='%s', lecturas=%d. HTTP %d.",
                 record.device_id,
-                cloud_id,
+                _EDGE_MAC,
+                len(record.readings),
+                response.status_code,
             )
-            return cloud_id
+            return True
 
         except requests.exceptions.ConnectionError:
             logger.warning(
@@ -186,4 +271,4 @@ class CloudApiClient:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Error inesperado al reenviar lote al cloud: %s.", exc)
 
-        return None
+        return False
