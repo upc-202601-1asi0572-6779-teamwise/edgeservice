@@ -2,9 +2,9 @@
 app.py — Smart Palm Edge Service
 
 Entrypoint del Edge API. Crea la aplicación Flask, registra los Blueprints
-y ejecuta el bootstrap en el primer request entrante.
+y ejecuta el bootstrap al iniciar la aplicación.
 
-Bootstrap (before_request, ejecutado una sola vez):
+Bootstrap (ejecutado en create_app, antes de aceptar requests):
   1. Inicializa la base de datos SQLite y crea las tablas si no existen.
   2. Siembra el dispositivo de prueba (smart-palm-001) si no está registrado.
   3. Sincroniza umbrales agronómicos desde el Web Service central.
@@ -12,6 +12,12 @@ Bootstrap (before_request, ejecutado una sola vez):
 Variables de entorno:
   DATABASE_PATH   — Ruta al archivo SQLite (default: edge_data.db)
   CLOUD_BASE_URL  — URL base del Web Service (default: http://localhost:5000)
+  EDGE_MAC        — Dirección MAC de este nodo edge registrada en el backend
+                    (p.ej. AA:BB:CC:DD:EE:FF). Requerida para el envío de
+                    telemetría al endpoint /api/v1/device/edge/{edgeMac}/digest.
+  IOT_MAC         — Dirección MAC del dispositivo IoT registrada en el backend
+                    (p.ej. BB:CC:DD:EE:FF:AA). Requerida para la sincronización
+                    de umbrales desde /api/v1/device/edge/{iotMac}/threshold.
   CLOUD_API_KEY   — API key para el Web Service (default: vacío)
   CLOUD_TIMEOUT   — Timeout HTTP en segundos (default: 5)
 """
@@ -19,7 +25,10 @@ Variables de entorno:
 import logging
 import os
 
+from dotenv import load_dotenv
 from flask import Flask
+
+load_dotenv()
 
 from iam.application.services import AuthApplicationService
 from iam.infrastructure.database import DeviceModel
@@ -68,7 +77,7 @@ def create_app() -> Flask:
     """
     Factoría de la aplicación Flask.
 
-    Registra Blueprints y configura el hook before_request para bootstrap.
+    Registra Blueprints y ejecuta el bootstrap antes de aceptar requests.
 
     Returns:
         Instancia de Flask lista para ejecutar.
@@ -79,31 +88,25 @@ def create_app() -> Flask:
     app.register_blueprint(iam_api)
     app.register_blueprint(telemetry_api)
 
-    # Flag de bootstrap: se ejecuta solo en el primer request
-    _bootstrapped: dict = {"done": False}
+    # Bootstrap síncrono: se ejecuta una vez al crear la app, no en el primer request.
+    # Esto evita la condición de carrera cuando dos requests llegan simultáneamente
+    # durante el arranque.
+    logger.info("Iniciando bootstrap del Edge API...")
 
-    @app.before_request
-    def bootstrap():
-        if _bootstrapped["done"]:
-            return
+    # 1. Inicializar base de datos
+    init_db(_DATABASE_PATH, _DB_MODELS)
 
-        logger.info("Iniciando bootstrap del Edge API...")
+    # 2. Sembrar dispositivo de prueba
+    _auth_service.seed_test_device()
 
-        # 1. Inicializar base de datos
-        init_db(_DATABASE_PATH, _DB_MODELS)
+    # 3. Sincronizar umbrales desde el cloud
+    synced = _sync_service.sync(_TEST_DEVICE_ID)
+    if synced == 0:
+        logger.info(
+            "Sin umbrales del cloud — se usarán valores agronómicos por defecto."
+        )
 
-        # 2. Sembrar dispositivo de prueba
-        _auth_service.seed_test_device()
-
-        # 3. Sincronizar umbrales desde el cloud
-        synced = _sync_service.sync(_TEST_DEVICE_ID)
-        if synced == 0:
-            logger.info(
-                "Sin umbrales del cloud — se usarán valores agronómicos por defecto."
-            )
-
-        _bootstrapped["done"] = True
-        logger.info("Bootstrap completado.")
+    logger.info("Bootstrap completado.")
 
     return app
 
@@ -114,4 +117,5 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="0.0.0.0", port=5001, debug=debug_mode)
