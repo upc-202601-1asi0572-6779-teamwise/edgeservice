@@ -7,6 +7,7 @@ representa un dispositivo IoT registrado y autorizado para enviar
 lecturas al Edge API.
 """
 
+import hmac
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -39,4 +40,4 @@ class Device:
         Returns:
             True si ambas credenciales coinciden, False en caso contrario.
         """
-        return self.device_id == device_id and self.api_key == api_key
+        return self.device_id == device_id and hmac.compare_digest(self.api_key, api_key)

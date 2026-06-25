@@ -9,6 +9,7 @@ agronómicos, persistirlas localmente y reenviarlas al cloud.
 """
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -92,9 +93,13 @@ class TelemetryApplicationService:
             {k: v for k, v in alert_flags.items() if v},
         )
 
-        # Fire-and-forget: el lote ya está persistido localmente;
-        # si el cloud falla, el ESP32 no se ve afectado.
-        CloudApiClient.post_telemetry_batch(record)
+        # Fire-and-forget real: lanza el reenvío en un hilo de fondo para
+        # que Flask responda 201 al ESP32 de inmediato, sin esperar al cloud.
+        threading.Thread(
+            target=CloudApiClient.post_telemetry_batch,
+            args=(record,),
+            daemon=True,
+        ).start()
 
         return record_id, alert_flags
 
@@ -126,10 +131,13 @@ class TelemetryApplicationService:
 
             try:
                 timestamp = datetime.fromisoformat(item["timestamp"])
-            except ValueError as exc:
-                raise ValueError(
-                    f"Lectura [{i}] tiene timestamp inválido: '{item['timestamp']}'."
-                ) from exc
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Lectura [%d] tiene timestamp inválido '%s' — usando hora de recepción.",
+                    i,
+                    item["timestamp"],
+                )
+                timestamp = datetime.now(timezone.utc)
 
             readings.append(
                 SensorReadingValue(

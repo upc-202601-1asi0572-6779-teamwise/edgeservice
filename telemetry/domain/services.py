@@ -31,11 +31,11 @@ _DEFAULT_THRESHOLDS: dict[str, AgronomicThreshold] = {
     "humidity": AgronomicThreshold(
         variable="humidity", min_value=75.0, max_value=100.0
     ),
-    "soil_moisture": AgronomicThreshold(
-        variable="soil_moisture", min_value=30.0, max_value=80.0
+    "soilMoisture": AgronomicThreshold(
+        variable="soilMoisture", min_value=30.0, max_value=80.0
     ),
     "light": AgronomicThreshold(
-        variable="light", min_value=500.0, max_value=10000.0
+        variable="light", min_value=10.0, max_value=90.0
     ),
 }
 
